@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gobblet Gobblers - 3D Cup Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@300;400;600;700&display=swap');
+        body { font-family: 'Fredoka', sans-serif; }
+        
+        /* 自定義動畫 */
+        @keyframes popIn {
+            0% { transform: scale(0); opacity: 0; }
+            80% { transform: scale(1.1); opacity: 1; }
+            100% { transform: scale(1); }
+        }
+        .animate-pop-in {
+            animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+<script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // --- 1. 基礎設定 ---
+    const INITIAL_HAND = [ { size: 0, count: 2 }, { size: 1, count: 2 }, { size: 2, count: 2 } ];
+    const AI_PLAYER = 'blue';
+    const HUMAN_PLAYER = 'orange';
+
+    const getTopPiece = (stack) => stack.length > 0 ? stack[stack.length - 1] : null;
+
+    // 判斷遊戲是否已經開始 (盤面是否有子)
+    const isGameStarted = (board) => {
+        return board.some(row => row.some(stack => stack.length > 0));
+    };
+
+    const checkWin = (board) => {
+        const lines = [
+            [[0,0], [0,1], [0,2]], [[1,0], [1,1], [1,2]], [[2,0], [2,1], [2,2]], 
+            [[0,0], [1,0], [2,0]], [[0,1], [1,1], [2,1]], [[0,2], [1,2], [2,2]], 
+            [[0,0], [1,1], [2,2]], [[0,2], [1,1], [2,0]] 
+        ];
+        
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            const p1 = getTopPiece(board[line[0][0]][line[0][1]]);
+            const p2 = getTopPiece(board[line[1][0]][line[1][1]]);
+            const p3 = getTopPiece(board[line[2][0]][line[2][1]]);
+
+            if (p1 && p2 && p3 && p1.player === p2.player && p1.player === p3.player) {
+                return p1.player;
+            }
+        }
+        return null;
+    };
+
+    // --- 2. 評估函數 ---
+    const evaluate = (board, aiHand, humanHand, winner) => {
+        if (winner === AI_PLAYER) return 100000;
+        if (winner === HUMAN_PLAYER) return -100000;
+
+        let score = 0;
+        const HAND_VAL = { 0: 20, 1: 50, 2: 200 }; 
+        
+        for (const p of aiHand) score += HAND_VAL[p.size];
+        for (const p of humanHand) score -= HAND_VAL[p.size];
+
+        const lines = [
+            [[0,0], [0,1], [0,2]], [[1,0], [1,1], [1,2]], [[2,0], [2,1], [2,2]], 
+            [[0,0], [1,0], [2,0]], [[0,1], [1,1], [2,1]], [[0,2], [1,2], [2,2]], 
+            [[0,0], [1,1], [2,2]], [[0,2], [1,1], [2,0]] 
+        ];
+
+        for (const line of lines) {
+            let aiCount = 0, humanCount = 0;
+            for(let k=0; k<3; k++) {
+                const p = getTopPiece(board[line[k][0]][line[k][1]]);
+                if(p) {
+                    if(p.player === AI_PLAYER) aiCount++;
+                    else humanCount++;
+                }
+            }
+            if (aiCount === 2 && humanCount === 0) score += 600; 
+            if (humanCount === 2 && aiCount === 0) score -= 4000; 
+        }
+        
+        const center = getTopPiece(board[1][1]);
+        if(center) {
+            if(center.player === AI_PLAYER) score += 40;
+            else score -= 40;
+        }
+        return score;
+    };
+
+    // --- 3. 搜尋核心 ---
+    const getRawMoves = (board, hand, player) => {
+        const moves = [];
+        const sizesDone = new Set();
+        
+        for (const p of hand) {
+            if(!sizesDone.has(p.size)) {
+                sizesDone.add(p.size);
+                for(let r=0; r<3; r++) for(let c=0; c<3; c++) {
+                    const top = getTopPiece(board[r][c]);
+                    if (!top || p.size > top.size) moves.push({ type: 'hand', piece: p, r, c });
+                }
+            }
+        }
+        
+        for(let r=0; r<3; r++) for(let c=0; c<3; c++) {
+            const top = getTopPiece(board[r][c]);
+            if (top && top.player === player) {
+                for(let tr=0; tr<3; tr++) for(let tc=0; tc<3; tc++) {
+                    if (r===tr && c===tc) continue;
+                    const target = getTopPiece(board[tr][tc]);
+                    if (!target || top.size > target.size) {
+                        moves.push({ type: 'board', piece: top, fromR: r, fromC: c, toR: tr, toC: tc });
+                    }
+                }
+            }
+        }
+        return moves;
+    };
+
+    const applyMove = (board, aiHand, humanHand, move, player) => {
+        const newBoard = [board[0], board[1], board[2]];
+        let newAiHand = aiHand;
+        let newHumanHand = humanHand;
+
+        if (move.type === 'hand') {
+            if (player === AI_PLAYER) newAiHand = aiHand.filter(p => p.id !== move.piece.id);
+            else newHumanHand = humanHand.filter(p => p.id !== move.piece.id);
+            
+            const r = move.r;
+            newBoard[r] = [...board[r]];
+            newBoard[r][move.c] = [...board[r][move.c], move.piece];
+        } else {
+            const fr = move.fromR, tr = move.toR;
+            if (newBoard[fr] === board[fr]) newBoard[fr] = [...board[fr]];
+            const sourceStack = [...board[fr][move.fromC]];
+            sourceStack.pop();
+            newBoard[fr][move.fromC] = sourceStack;
+
+            if (newBoard[tr] === board[tr]) newBoard[tr] = [...board[tr]];
+            newBoard[tr][move.toC] = [...board[tr][move.toC], move.piece];
+        }
+        return { newBoard, newAiHand, newHumanHand };
+    };
+
+    const think = (board, aiHand, humanHand, difficulty) => {
+        let nodesVisited = 0;
+        const MAX_NODES = 15000;
+        const SEARCH_DEPTH = difficulty === 'hard' ? 3 : 1;
+
+        const search = (d, alpha, beta, isMax, cBoard, cAiHand, cHumanHand) => {
+            nodesVisited++;
+            if (nodesVisited > MAX_NODES) return isMax ? -10000 : 10000;
+
+            const winner = checkWin(cBoard);
+            if (winner || d === 0) return evaluate(cBoard, cAiHand, cHumanHand, winner);
+
+            const currentPlayer = isMax ? AI_PLAYER : HUMAN_PLAYER;
+            const currentHand = isMax ? cAiHand : cHumanHand;
+            const rawMoves = getRawMoves(cBoard, currentHand, currentPlayer);
+
+            rawMoves.sort((a, b) => (b.type === 'board' ? 2 : 0) - (a.type === 'board' ? 2 : 0));
+
+            if (isMax) {
+                let maxEval = -Infinity;
+                for (const move of rawMoves) {
+                    const next = applyMove(cBoard, cAiHand, cHumanHand, move, currentPlayer);
+                    if (checkWin(next.newBoard) === HUMAN_PLAYER) continue; 
+                    const evalVal = search(d - 1, alpha, beta, false, next.newBoard, next.newAiHand, next.newHumanHand);
+                    maxEval = Math.max(maxEval, evalVal);
+                    alpha = Math.max(alpha, evalVal);
+                    if (beta <= alpha) break;
+                }
+                return maxEval === -Infinity ? -20000 : maxEval;
+            } else {
+                let minEval = Infinity;
+                for (const move of rawMoves) {
+                    const next = applyMove(cBoard, cAiHand, cHumanHand, move, currentPlayer);
+                    if (checkWin(next.newBoard) === AI_PLAYER) continue;
+                    const evalVal = search(d - 1, alpha, beta, true, next.newBoard, next.newAiHand, next.newHumanHand);
+                    minEval = Math.min(minEval, evalVal);
+                    beta = Math.min(beta, evalVal);
+                    if (beta <= alpha) break;
+                }
+                return minEval === Infinity ? 20000 : minEval;
+            }
+        };
+
+        const moves = getRawMoves(board, aiHand, AI_PLAYER);
+        if (moves.length === 0) return null;
+
+        let bestMove = moves[0];
+        let bestScore = -Infinity;
+        moves.sort(() => Math.random() - 0.5);
+
+        for (const move of moves) {
+            const next = applyMove(board, aiHand, humanHand, move, AI_PLAYER);
+            if (checkWin(next.newBoard) === HUMAN_PLAYER) continue;
+            if (checkWin(next.newBoard) === AI_PLAYER) return move;
+
+            const score = search(SEARCH_DEPTH - 1, -Infinity, Infinity, false, next.newBoard, next.newAiHand, next.newHumanHand);
+            if (score > bestScore) {
+                bestScore = score;
+                bestMove = move;
+            }
+        }
+        return bestMove;
+    };
+
+
+    // --- 4. UI Components (Visuals) ---
+
+    // 極簡圓頂杯 (Minimalist Dome)
+    const MinimalDomePiece = ({ piece, isSelected, onClick, inHand, style }) => {
+        const sizeConfig = {
+            0: { w: 'w-10', h: 'h-11', shadowDepth: 3 },
+            1: { w: 'w-14', h: 'h-16', shadowDepth: 5 },
+            2: { w: 'w-20', h: 'h-24', shadowDepth: 8 },
+        };
+        const cfg = sizeConfig[piece.size];
+        const isOrange = piece.player === 'orange';
+        
+        const bgStyle = isOrange 
+            ? 'radial-gradient(circle at 30% 30%, #fb923c, #ea580c)' 
+            : 'radial-gradient(circle at 30% 30%, #60a5fa, #1d4ed8)';
+            
+        const shadowColor = isOrange ? '#9a3412' : '#172554'; 
+
+        return (
+            <div 
+                onClick={onClick}
+                className={`
+                    absolute cursor-pointer transition-all duration-300
+                    ${cfg.w} ${cfg.h}
+                    ${inHand ? 'relative mb-2 mx-1' : ''}
+                `}
+                style={{
+                    ...style,
+                    transform: isSelected ? 'translateY(-20px) scale(1.05)' : 'translateY(0)',
+                    zIndex: isSelected ? 50 : (style?.zIndex || 10),
+                }}
+            >
+                <div 
+                    className={`w-full h-full rounded-t-full rounded-b-xl relative overflow-hidden`}
+                    style={{
+                        background: bgStyle,
+                        boxShadow: isSelected 
+                            ? `0px 30px 30px rgba(0,0,0,0.25)` 
+                            : `0px ${cfg.shadowDepth}px 0px ${shadowColor}, 0px ${cfg.shadowDepth + 3}px 6px rgba(0,0,0,0.35)`,
+                        opacity: isSelected ? 0.6 : 1, 
+                    }}
+                >
+                    <div className="absolute top-[10%] left-[15%] w-[50%] h-[40%] bg-white/20 rounded-full blur-sm pointer-events-none"></div>
+                </div>
+            </div>
+        );
+    };
+
+    // 浮凸立體分隔線
+    const EmbossedGridBar = ({ className }) => (
+        <div className={`absolute bg-stone-200 rounded-sm ${className}`}
+             style={{
+                 boxShadow: 'inset 2px 2px 3px rgba(255,255,255,0.9), 3px 3px 6px rgba(0,0,0,0.2)',
+                 borderTop: '1px solid rgba(255,255,255,0.5)',
+                 borderLeft: '1px solid rgba(255,255,255,0.5)',
+             }}
+        ></div>
+    );
+
+    function GobbletGame() {
+        const [gameMode, setGameMode] = useState(null); 
+        const [board, setBoard] = useState(Array(3).fill(null).map(() => Array(3).fill([])));
+        const [orangeHand, setOrangeHand] = useState([]);
+        const [blueHand, setBlueHand] = useState([]);
+        const [winner, setWinner] = useState(null);
+        const [selectedPiece, setSelectedPiece] = useState(null);
+        const [isAIThinking, setIsAIThinking] = useState(false);
+        
+        const [currentPlayer, setCurrentPlayer] = useState('orange');
+
+        // [邏輯修正 1 & 3] 初始化永遠是 Orange 先，不依賴上局狀態
+        const initGame = (mode) => {
+            const generateHand = (player) => {
+                const hand = [];
+                INITIAL_HAND.forEach(({ size, count }) => {
+                    for (let i = 0; i < count; i++) hand.push({ id: `${player}-${size}-${i}-${Math.random()}`, player, size });
+                });
+                return hand.sort((a, b) => a.size - b.size);
+            };
+            setBoard(Array(3).fill(null).map(() => Array(3).fill([])));
+            setOrangeHand(generateHand('orange'));
+            setBlueHand(generateHand('blue'));
+            
+            // 強制重置為 Orange
+            setCurrentPlayer('orange');
+            
+            setWinner(null);
+            setSelectedPiece(null);
+            if(mode) setGameMode(mode);
+        };
+
+        const goHome = () => {
+            setGameMode(null);
+        };
+
+        // [邏輯修正 2] 立即切換當前玩家，不需額外確認
+        const toggleCurrentPlayer = () => {
+            if (isGameStarted(board)) return; // 已經開始就不能切
+            setCurrentPlayer(prev => prev === 'orange' ? 'blue' : 'orange');
+        };
+
+        // AI 觸發邏輯
+        useEffect(() => {
+            // 只要當前玩家變成 Blue (AI)，且遊戲沒結束，就觸發 AI
+            if (gameMode && gameMode.startsWith('ai') && currentPlayer === AI_PLAYER && !winner) {
+                setIsAIThinking(true);
+                const difficulty = gameMode === 'ai-hard' ? 'hard' : 'easy';
+                
+                const timer = setTimeout(() => {
+                    try {
+                        const move = think(board, blueHand, orangeHand, difficulty);
+                        setIsAIThinking(false);
+                        if (move) executeMove(move);
+                        else setWinner(HUMAN_PLAYER);
+                    } catch (err) {
+                        setIsAIThinking(false);
+                        const moves = getRawMoves(board, blueHand, AI_PLAYER);
+                        if(moves.length > 0) executeMove(moves[0]);
+                    }
+                }, 100);
+                return () => clearTimeout(timer);
+            }
+        }, [currentPlayer, gameMode, winner]);
+
+        const executeMove = (moveInfo) => {
+            const newBoard = board.map(row => row.map(stack => [...stack]));
+            let newOrangeHand = [...orangeHand];
+            let newBlueHand = [...blueHand];
+
+            if (moveInfo.type === 'hand') {
+                if (moveInfo.piece.player === 'orange') newOrangeHand = newOrangeHand.filter(p => p.id !== moveInfo.piece.id);
+                else newBlueHand = newBlueHand.filter(p => p.id !== moveInfo.piece.id);
+                newBoard[moveInfo.r][moveInfo.c].push(moveInfo.piece);
+            } else {
+                newBoard[moveInfo.fromR][moveInfo.fromC].pop();
+                newBoard[moveInfo.toR][moveInfo.toC].push(moveInfo.piece);
+            }
+
+            setBoard(newBoard);
+            setOrangeHand(newOrangeHand);
+            setBlueHand(newBlueHand);
+            
+            const winResult = checkWin(newBoard);
+            if (winResult) setWinner(winResult);
+            else setCurrentPlayer(prev => prev === 'orange' ? 'blue' : 'orange');
+        };
+
+        const handleSelect = (piece, source) => {
+            if (winner || isAIThinking) return;
+            if (gameMode && gameMode.startsWith('ai') && currentPlayer === AI_PLAYER) return;
+            if (piece.player !== currentPlayer) return;
+            
+            // 反選取邏輯
+            if (selectedPiece && selectedPiece.piece.id === piece.id) {
+                setSelectedPiece(null);
+                return;
+            }
+            setSelectedPiece({ piece, source });
+        };
+
+        const handleCellClick = (r, c) => {
+            if (!selectedPiece || winner || isAIThinking) return;
+            
+            // [操作優化] 反選取：如果點到自己已選取的棋子位置，視為取消
+            if (selectedPiece.source !== 'hand' && selectedPiece.source.row === r && selectedPiece.source.col === c) {
+                setSelectedPiece(null);
+                return;
+            }
+
+            const topPiece = getTopPiece(board[r][c]);
+            if (topPiece && selectedPiece.piece.size <= topPiece.size) return;
+
+            let moveData;
+            if (selectedPiece.source === 'hand') {
+                moveData = { type: 'hand', piece: selectedPiece.piece, r, c };
+            } else {
+                moveData = { type: 'board', piece: selectedPiece.piece, fromR: selectedPiece.source.row, fromC: selectedPiece.source.col, toR: r, toC: c };
+            }
+            executeMove(moveData);
+            setSelectedPiece(null);
+        };
+
+        // UI 渲染
+        if (!gameMode) {
+            return (
+                <div className="min-h-screen bg-stone-50 flex flex-col items-center justify-center p-4 text-center font-sans">
+                    <h1 className="text-6xl font-black text-slate-700 mb-12 tracking-tighter drop-shadow-sm">GOBBLET</h1>
+                    <div className="flex flex-col gap-4 w-full max-w-xs">
+                        <button onClick={() => initGame('pvp')} className="p-4 rounded-2xl bg-white shadow-[0_8px_0_#e2e8f0] active:shadow-[0_2px_0_#e2e8f0] active:translate-y-1.5 transition-all text-xl font-bold text-slate-600 border border-slate-100">雙人對戰 (PvP)</button>
+                        <div className="h-4"></div>
+                        <button onClick={() => initGame('ai-easy')} className="p-4 rounded-2xl bg-blue-100 shadow-[0_8px_0_#bfdbfe] active:shadow-[0_2px_0_#bfdbfe] active:translate-y-1.5 transition-all text-xl font-bold text-blue-600 border border-blue-200">
+                            AI 簡單 <span className="text-xs block opacity-70 font-normal">適合練手</span>
+                        </button>
+                        <button onClick={() => initGame('ai-hard')} className="p-4 rounded-2xl bg-indigo-100 shadow-[0_8px_0_#c7d2fe] active:shadow-[0_2px_0_#c7d2fe] active:translate-y-1.5 transition-all text-xl font-bold text-indigo-600 border border-indigo-200">
+                            AI 困難 <span className="text-xs block opacity-70 font-normal">認真模式</span>
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        const gameStarted = isGameStarted(board);
+
+        return (
+            <div className="min-h-screen bg-stone-50 flex flex-col items-center justify-start pt-8 p-4 overflow-hidden">
+                <div className="w-full max-w-3xl flex items-center justify-between mb-6 px-4 z-20">
+                    <button onClick={goHome} className="px-4 py-2 rounded-full bg-white shadow text-gray-600 font-bold hover:bg-gray-50 transition-colors">← MENU</button>
+                    
+                    {/* [修正] 切換先手：直接改變 currentPlayer，且只有遊戲未開始時顯示 */}
+                    {!gameStarted && !winner && (
+                        <button 
+                            onClick={toggleCurrentPlayer}
+                            className={`px-5 py-2 rounded-full text-sm font-bold transition-all shadow-sm border
+                                ${currentPlayer === 'orange' 
+                                    ? 'bg-orange-100 text-orange-600 border-orange-300 hover:bg-orange-200' 
+                                    : 'bg-blue-100 text-blue-600 border-blue-300 hover:bg-blue-200'
+                                }`}
+                        >
+                            切換先手: {currentPlayer === 'orange' ? '橘色' : '藍色'}
+                        </button>
+                    )}
+
+                    <button onClick={() => initGame(gameMode)} className="w-10 h-10 rounded-full bg-white shadow flex items-center justify-center text-gray-600 font-bold hover:rotate-180 transition-transform">↻</button>
+                </div>
+
+                <div className="mb-8 text-center z-10">
+                    <div className={`px-8 py-3 rounded-2xl bg-white shadow-lg border border-gray-100 font-bold text-slate-600 flex items-center gap-3 text-xl`}>
+                        {isAIThinking ? (
+                            <span className="flex items-center gap-2"><span className="animate-spin">⚙️</span> Thinking...</span>
+                        ) : (
+                            <>
+                                <span className={currentPlayer === 'orange' ? 'text-orange-500' : 'text-blue-500'}>
+                                    {currentPlayer === 'orange' ? 'Orange Turn' : 'Blue Turn'}
+                                </span>
+                            </>
+                        )}
+                    </div>
+                </div>
+
+                <div className="flex flex-col md:flex-row items-center gap-12">
+                    {/* Orange Hand */}
+                    <div className={`
+                        p-6 rounded-3xl min-w-[140px] flex flex-col items-center gap-2 transition-all duration-500 border border-gray-100
+                        ${currentPlayer === 'orange' ? 'bg-white shadow-xl scale-105' : 'bg-white/60 opacity-70'}
+                    `}>
+                        <h3 className="text-orange-500 font-black tracking-widest mb-4">ORANGE</h3>
+                        <div className="flex flex-wrap gap-4 justify-center w-32 content-start min-h-[120px]">
+                            {orangeHand.map(p => (
+                                <MinimalDomePiece 
+                                    key={p.id} 
+                                    piece={p} 
+                                    inHand={true} 
+                                    isSelected={selectedPiece?.piece.id === p.id} 
+                                    onClick={() => handleSelect(p, 'hand')} 
+                                />
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* 3D Board Container */}
+                    <div className="relative p-4" style={{ perspective: '800px' }}>
+                        <div 
+                            className="relative bg-white rounded-3xl shadow-[0_30px_60px_-15px_rgba(0,0,0,0.3)] p-4 transition-transform duration-500 border border-gray-100"
+                            style={{ transform: 'rotateX(25deg) scale(0.95)', transformStyle: 'preserve-3d' }}
+                        >
+                            {/* 立體井字架 */}
+                            <div className="absolute inset-0 pointer-events-none z-0 rounded-3xl overflow-hidden">
+                                <EmbossedGridBar className="top-4 bottom-4 left-[33%] w-3" />
+                                <EmbossedGridBar className="top-4 bottom-4 left-[66%] w-3" />
+                                <EmbossedGridBar className="left-4 right-4 top-[33%] h-3" />
+                                <EmbossedGridBar className="left-4 right-4 top-[66%] h-3" />
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-0 relative z-10">
+                                {board.map((row, r) => row.map((stack, c) => {
+                                    const topPiece = getTopPiece(stack);
+                                    const isValid = selectedPiece && (!topPiece || selectedPiece.piece.size > topPiece.size) && !(selectedPiece.source.row === r && selectedPiece.source.col === c);
+                                    
+                                    return (
+                                        <div 
+                                            key={`${r}-${c}`} 
+                                            onClick={() => handleCellClick(r, c)} 
+                                            className={`
+                                                w-24 h-24 md:w-28 md:h-28 flex items-center justify-center relative
+                                                transition-colors duration-200 rounded-xl
+                                                ${isValid ? 'bg-green-500/10 cursor-pointer' : ''}
+                                            `}
+                                        >
+                                            {stack.map((p, i) => (
+                                                <MinimalDomePiece 
+                                                    key={p.id}
+                                                    piece={p}
+                                                    inHand={false}
+                                                    onClick={(e) => {
+                                                        if (i === stack.length - 1) {
+                                                            e.stopPropagation();
+                                                            if (selectedPiece) handleCellClick(r, c);
+                                                            else handleSelect(p, {row:r, col:c});
+                                                        }
+                                                    }}
+                                                    isSelected={selectedPiece?.piece.id === p.id}
+                                                    style={{ zIndex: i + 10 }}
+                                                />
+                                            ))}
+                                            
+                                            {isValid && (
+                                                <div className="absolute w-12 h-12 rounded-full border-4 border-dashed border-green-400 opacity-50 pointer-events-none animate-pulse"></div>
+                                            )}
+                                        </div>
+                                    );
+                                }))}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Blue Hand */}
+                    <div className={`
+                        p-6 rounded-3xl min-w-[140px] flex flex-col items-center gap-2 transition-all duration-500 border border-gray-100
+                        ${currentPlayer === 'blue' ? 'bg-white shadow-xl scale-105' : 'bg-white/60 opacity-70'}
+                    `}>
+                        <h3 className="text-blue-500 font-black tracking-widest mb-4">BLUE</h3>
+                        <div className="flex flex-wrap gap-4 justify-center w-32 content-start min-h-[120px]">
+                            {blueHand.map(p => (
+                                <MinimalDomePiece 
+                                    key={p.id} 
+                                    piece={p} 
+                                    inHand={true} 
+                                    isSelected={selectedPiece?.piece.id === p.id} 
+                                    onClick={() => handleSelect(p, 'hand')} 
+                                />
+                            ))}
+                        </div>
+                    </div>
+                </div>
+
+                {/* [修正] 勝利畫面：改為底部浮動面板，不遮擋棋盤 */}
+                {winner && (
+                    <div className="fixed bottom-0 left-0 right-0 p-4 z-50 animate-in slide-in-from-bottom duration-300">
+                        <div className="bg-white/90 backdrop-blur-md p-6 rounded-[2rem] shadow-[0_-10px_40px_rgba(0,0,0,0.2)] flex flex-row items-center justify-between gap-6 max-w-2xl mx-auto border border-white/50">
+                            <div className="flex items-center gap-4">
+                                <div className="text-5xl">{winner === HUMAN_PLAYER ? '🏆' : (gameMode === 'pvp' ? '🎉' : '🤖')}</div>
+                                <div>
+                                    <h2 className={`text-2xl font-black ${winner === 'orange' ? 'text-orange-500' : 'text-blue-500'}`}>
+                                        {winner === 'orange' ? 'Orange' : 'Blue'} Wins!
+                                    </h2>
+                                    <p className="text-gray-500 text-sm font-bold">Game Over</p>
+                                </div>
+                            </div>
+                            <div className="flex gap-3">
+                                <button onClick={goHome} className="px-6 py-3 rounded-xl font-bold text-gray-500 hover:bg-gray-100 transition-colors">選單</button>
+                                <button onClick={() => initGame(gameMode)} className="px-6 py-3 rounded-xl bg-slate-800 text-white font-bold shadow-lg hover:scale-105 transition-transform">再來一局</button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+        );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<GobbletGame />);
+</script>
+</body>
+</html>
