@@ -8,6 +8,8 @@
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+		 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+		<!-- <script src="ort.js"></script> -->
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@300;400;600;700&display=swap');
         body { font-family: 'Fredoka', sans-serif; }
@@ -27,6 +29,8 @@
     <div id="root"></div>
 
 <script type="text/babel">
+// async function main(session) {
+async function main() {
     const { useState, useEffect, useRef } = React;
 
     // --- 1. 基礎設定 ---
@@ -154,7 +158,7 @@
         return { newBoard, newAiHand, newHumanHand };
     };
 
-    const think = (board, aiHand, humanHand, difficulty) => {
+    const thinkSearch = (board, aiHand, humanHand, difficulty) => {
         let nodesVisited = 0;
         const MAX_NODES = 15000;
         const SEARCH_DEPTH = difficulty === 'hard' ? 3 : 1;
@@ -218,6 +222,419 @@
         return bestMove;
     };
 
+		const argmax = (arr) => {
+			let idx = 0;
+			let maxV = arr[idx];
+			for (let i = 0; i < arr.length; i++) {
+				if (arr[i] > maxV) {
+					idx = i;
+					maxV = arr[i];
+				}
+			}
+			return idx;
+		};
+
+		const randomChoice = (probs) => {
+			let cum = [];
+			let sum = 0;
+			for (let i = 0; i < probs.length; i++) {
+				let p = probs[i];
+
+				sum += p;
+				cum.push(sum);
+			}
+
+			let val = Math.random();
+			for (let i = 0; i < cum.length; i++) {
+				if (cum[i] > val) {
+					return i;
+				}
+			}
+		};
+
+		const informationStateTensor = (currentPlayer, board) => {
+			let tensor = [];
+			for (let i = 0; i < 1+3*3*3*2; i++) {
+				tensor.push(0);
+			}
+
+			let offset = 0;
+			if (currentPlayer == 1) {
+				tensor[offset+0] = 1;
+			}
+			offset += 1;
+
+			for (let y = 0; y < board.length; y++) {
+				for (let x = 0; x < board[y].length; x++) {
+					for (let i = 0; i < board[y][x].length; i++) {
+						let hand = board[y][x][i];
+						let player = -1;
+						if (hand.player == "orange") {
+							player = 1-currentPlayer;
+						} else {
+							player = currentPlayer;
+						}
+						let size = hand.size;
+
+						let idx = y*3*3*2 + x*3*2 + size*2 + player;
+						tensor[offset+idx] = 1;
+					}
+				}
+			}
+			return {data: tensor, shape: [tensor.length]};
+		};
+
+		var CURRENT_PLAYER = 0;
+		const _NUM_PLAYERS = 2;
+		const INVALID_PLAYER = -3;
+		const _BOARD_WIDTH = 3;
+		const _BOARD_SIZE = _BOARD_WIDTH * _BOARD_WIDTH;
+		const _NUM_SIZES = 3;
+		const _PIECES_PER_SIZE = 2;
+		const _ACTION_OFFSET = _NUM_SIZES * _BOARD_SIZE;
+		const largestPiece = function(currentPlayer, tower) {
+			let largest = {player: INVALID_PLAYER, size: -1};
+			for (let i = 0; i < tower.length; i++) {
+				let hand = tower[i];
+				let player = -1;
+				if (hand.player == "orange") {
+					player = 1-currentPlayer;
+				} else {
+					player = currentPlayer;
+				}
+				let size = hand.size;
+
+				if (size > largest.size) {
+					largest.player = player;
+					largest.size = size;
+				}
+			}
+			return largest;
+		};
+		const getReserves = function(currentPlayer, board) {
+			let reserves = [[0, 0, 0], [0, 0, 0]];
+			for (let player = 0; player < reserves.length; player++) {
+				for (let size = 0; size < reserves[player].length; size++) {
+					reserves[player][size] = _PIECES_PER_SIZE;
+				}
+			}
+
+			for (let y = 0; y < board.length; y++) {
+				for (let x = 0; x < board[y].length; x++) {
+					for (let i = 0; i < board[y][x].length; i++) {
+						let hand = board[y][x][i];
+						let player = -1;
+						if (hand.player == "orange") {
+							player = 1-currentPlayer;
+						} else {
+							player = currentPlayer;
+						}
+						let size = hand.size;
+
+						reserves[player][size] -= 1;
+					}
+				}
+			}
+
+			return reserves;
+		};
+		const actionIdx = function(reserves, srcyx, dstyx) {
+			let src = srcyx[0]*_BOARD_WIDTH + srcyx[1];
+			let dst = dstyx[0]*_BOARD_WIDTH + dstyx[1];
+			if (reserves != -1) {
+				return reserves*_BOARD_SIZE + dst;
+			}
+			return _ACTION_OFFSET + src*_BOARD_SIZE + dst
+		};
+
+		const legalActions = function(player, board) {
+			let reserves = getReserves(player, board);
+			let legals = [];
+
+			// Actions that place a new piece on the board.
+			for (let srcSize = 0; srcSize < reserves[player].length; srcSize++) {
+				let pieces = reserves[player][srcSize];
+				if (pieces == 0) {
+					continue;
+				}
+				for (let dsty = 0; dsty < _BOARD_WIDTH; dsty++) {
+					for (let dstx = 0; dstx < _BOARD_WIDTH; dstx++) {
+						let dst = [dsty, dstx];
+						let dstPiece = largestPiece(player, board[dsty][dstx]);
+						if (dstPiece.player == player) {
+							continue
+						}
+						if (srcSize > dstPiece.size) {
+							legals.push(actionIdx(srcSize, [-1,-1], dst));
+						}
+					}
+				}
+			}
+
+			// Actions that move an existing piece on the board.
+			for (let srcy = 0; srcy < _BOARD_WIDTH; srcy++) {
+				for (let srcx = 0; srcx < _BOARD_WIDTH; srcx++) {
+					let src = [srcy, srcx];
+					let srcPiece = largestPiece(player, board[srcy][srcx]);
+					if (srcPiece.player != player) {
+						continue;
+					}
+					for (let dsty = 0; dsty < _BOARD_WIDTH; dsty++) {
+						for (let dstx = 0; dstx < _BOARD_WIDTH; dstx++) {
+							let dst = [dsty, dstx];
+							let dstPiece = largestPiece(player, board[dsty][dstx]);
+							if (dstPiece.player == player) {
+								continue
+							}
+							if (srcPiece.size > dstPiece.size) {
+								legals.push(actionIdx(-1, src, dst));
+							}
+						}
+					}
+				}
+			}
+
+			return legals;
+		}
+
+		const legalActionsMask = function(player, board) {
+			let mask = [];
+			for (let i = 0; i < (_NUM_SIZES+_BOARD_SIZE)*_BOARD_SIZE; i++) {
+				mask.push(0);
+			}
+			let legals = legalActions(player, board);
+			for (let i = 0; i < legals.length; i++) {
+				mask[legals[i]] = 1;
+			}
+			return {data: mask, shape: [mask.length]};
+		};
+
+		const actionFromIdx = (idx) => {
+			if (idx < _ACTION_OFFSET) {
+        let dst_idx = idx % _BOARD_SIZE;
+        let dst = [Math.floor(dst_idx / _BOARD_WIDTH), Math.floor(dst_idx % _BOARD_WIDTH)];
+				return {reserves: Math.floor(idx/_BOARD_SIZE), src: [-1,-1], dst: dst};
+			}
+
+    	idx -= _ACTION_OFFSET;
+    	let src_idx = Math.floor(idx / _BOARD_SIZE);
+    	let src = [Math.floor(src_idx / _BOARD_WIDTH), Math.floor(src_idx % _BOARD_WIDTH)];
+    	let dst_idx = idx % _BOARD_SIZE;
+    	let dst = [Math.floor(dst_idx / _BOARD_WIDTH), Math.floor(dst_idx % _BOARD_WIDTH)];
+    	return {reserves: -1, src: src, dst: dst};
+		};
+
+		function swap(board) {
+			let nb = new Array(board.length).fill(0);
+			for (let boardIdx = 0; boardIdx < _BOARD_SIZE; boardIdx++) {
+				for (let size = 0; size < _NUM_SIZES; size++) {
+					let i = boardIdx*_NUM_SIZES*_NUM_PLAYERS + size*_NUM_PLAYERS;
+
+					nb[i+1] = board[i];
+					nb[i] = board[i+1];
+				}
+			}
+			return nb;
+		}
+		function boardToInt(board) {
+			let nb = new Array(board.length).fill(0);
+			for (let i = 0; i < board.length; i++) {
+				nb[board.length-1-i] = board[i];
+			}
+			let z10 = new Array(10).fill(0);
+			let intBits = z10.concat(nb)
+			let b = parseInt(intBits.join(""), 2);
+			return b;
+		}
+		function transformBoard(board, dsts) {
+			let nb = new Array(board.length).fill(0);
+			for (let src = 0; src < _BOARD_SIZE; src++) {
+				let dst = dsts[src];
+				for (let i = 0; i < _NUM_SIZES*_NUM_PLAYERS; i++) {
+					let s = src*_NUM_SIZES*_NUM_PLAYERS + i;
+					let d = dst*_NUM_SIZES*_NUM_PLAYERS + i;
+					nb[d] = board[s];
+				}
+			}
+			return nb;
+		}
+		function flipud(board) {
+			return transformBoard(board, [6, 7, 8, 3, 4, 5, 0, 1, 2]);
+		}
+		function antitranspose(board) {
+			return transformBoard(board, [8, 5, 2, 7, 4, 1, 6, 3, 0]);
+		}
+		function canonical(s) {
+			let minS = JSON.parse(JSON.stringify(s));
+			s = flipud(s);        if (boardToInt(s)<boardToInt(minS)) {minS = s;}
+			s = antitranspose(s); if (boardToInt(s)<boardToInt(minS)) {minS = s;}
+			s = flipud(s);        if (boardToInt(s)<boardToInt(minS)) {minS = s;}
+			s = antitranspose(s); if (boardToInt(s)<boardToInt(minS)) {minS = s;}
+			s = flipud(s);        if (boardToInt(s)<boardToInt(minS)) {minS = s;}
+			s = antitranspose(s); if (boardToInt(s)<boardToInt(minS)) {minS = s;}
+			s = flipud(s);        if (boardToInt(s)<boardToInt(minS)) {minS = s;}
+			return minS;
+		}
+		function applyAction(currentPlayer, board0, aIdx) {
+			let board = JSON.parse(JSON.stringify(board0));
+
+			let action = actionFromIdx(aIdx);
+			if (action.reserves != -1) {
+				let dst = action.dst[0]*_BOARD_WIDTH + action.dst[1];
+				let dstidx = dst*_NUM_SIZES*_NUM_PLAYERS + action.reserves*_NUM_PLAYERS + currentPlayer;
+				board[dstidx] = 1;
+			} else {
+				let src = action.src[0]*_BOARD_WIDTH + action.src[1];
+				let size = -1;
+				for (let sz = _NUM_SIZES-1; sz >= 0; sz--) {
+					let srcidx = src*_NUM_SIZES*_NUM_PLAYERS + sz*_NUM_PLAYERS + currentPlayer;
+					if (board[srcidx] == 1) {
+						size = sz;
+						break;
+					}
+				}
+				if (size == -1) {
+					alert("wrong size");
+				}
+
+				let srcidx = src*_NUM_SIZES*_NUM_PLAYERS + size*_NUM_PLAYERS + currentPlayer;
+				board[srcidx] = 0;
+				let dst = action.dst[0]*_BOARD_WIDTH + action.dst[1];
+				let dstidx = dst*_NUM_SIZES*_NUM_PLAYERS + size*_NUM_PLAYERS + currentPlayer;
+				board[dstidx] = 1;
+			}
+			return board;
+		}
+		function deCanon(currentPlayer, canBoard0, canA, board0, mask) {
+			let canBoard = applyAction(0, canBoard0, canA);
+			let canBoardC = canonical(canBoard);
+			for (let a = 0; a < mask.data.length; a++) {
+				if (mask.data[a] == 0) {
+					continue;
+				}
+				let board = applyAction(currentPlayer, board0, a);
+
+				let sb = JSON.parse(JSON.stringify(board));
+				if (currentPlayer == 1) {
+					sb = swap(sb);
+				}
+				sb = canonical(sb);
+
+				if (JSON.stringify(canBoardC) == JSON.stringify(sb)) {
+					return a;
+				}
+			}
+			alert("no matching action");
+		}
+
+		function findAction(action, board, aiHand, AI_PLAYER) {
+      const moves = getRawMoves(board, aiHand, AI_PLAYER);
+			let gact = {type: "invalid"};
+			if (action.reserves != -1) {
+				for (let i = 0; i < moves.length; i++) {
+					let m = moves[i];
+					if (m.type != "hand") {
+						continue;
+					}
+					if (m.piece.size != action.reserves) {
+						continue
+					}
+					if (!(m.r == action.dst[0] && m.c == action.dst[1])) {
+						continue
+					}
+					gact = m;
+					break;
+				}
+			} else {
+				for (let i = 0; i < moves.length; i++) {
+					let m = moves[i];
+					if (m.type != "board") {
+						continue;
+					}
+					if (!(m.fromR == action.src[0] && m.fromC == action.src[1])) {
+						continue
+					}
+					if (!(m.toR == action.dst[0] && m.toC == action.dst[1])) {
+						continue
+					}
+					gact = m;
+					break;
+				}
+			}
+			if (gact.type == "invalid") {
+				console.log("invalid action");
+			}
+			return gact;
+		}
+
+		// const session = await ort.InferenceSession.create("avg_policy.onnx");
+		// console.log(session.inputMetadata, session.outputMetadata);
+    async function thinkEscher(board, aiHand, humanHand, difficulty) {
+			const currentPlayer = CURRENT_PLAYER;
+			const obs = informationStateTensor(currentPlayer, board);
+			const mask = legalActionsMask(currentPlayer, board);
+			const feeds = {
+				x: new ort.Tensor("float32", obs.data, obs.shape),
+				mask: new ort.Tensor("int64", mask.data, mask.shape),
+			};
+			const results = await session.run(feeds);
+			const logits = results.div.cpuData;
+			let aidx = argmax(logits);
+			// aidx = randomChoice(logits);
+			const action = actionFromIdx(aidx);
+			console.log("reserves", action.reserves, "src", action.src[0], action.src[1], "dst", action.dst[0], action.dst[1]);
+
+			const gact = findAction(action, board, aiHand, AI_PLAYER);
+			return gact;
+		};
+
+		const wrong_map = await (await fetch("wrong_map.json")).json();
+		const session = await ort.InferenceSession.create("policy.onnx");
+		// console.log(session.inputMetadata, session.outputMetadata);
+    async function thinkSolve(board, aiHand, humanHand, difficulty) {
+			const currentPlayer = CURRENT_PLAYER;
+			const obs = informationStateTensor(currentPlayer, board);
+			const mask = legalActionsMask(currentPlayer, board);
+
+			let sb = obs.data.slice(1);
+			if (obs.data[0] == 1) {
+				sb = swap(sb);
+			}
+			sb = canonical(sb);
+			console.log(JSON.stringify(sb));
+
+			let aidxCan = -1;
+			let sbint = boardToInt(sb);
+			if (wrong_map.hasOwnProperty(sbint)) {
+				aidxCan = wrong_map[sbint];
+			} else {
+				const feeds = {
+					x: new ort.Tensor("float32", sb, [sb.length]),
+				};
+				const results = await session.run(feeds);
+				const logits = results.softmax.cpuData;
+				aidxCan = argmax(logits);
+			}
+			let aidx = deCanon(currentPlayer, sb, aidxCan, obs.data.slice(1), mask);
+			const action = actionFromIdx(aidx);
+			console.log("reserves", action.reserves, "src", action.src[0], action.src[1], "dst", action.dst[0], action.dst[1]);
+
+			const gact = findAction(action, board, aiHand, AI_PLAYER);
+			return gact;
+		}
+
+    function think(board, aiHand, humanHand, difficulty){
+			const searchAct = new Promise(function(resolve, reject){
+				let act = thinkSearch(board, aiHand, humanHand, difficulty);
+				resolve(act);
+			});
+			// const escherAct = thinkEscher(board, aiHand, humanHand, difficulty);
+			const solveAct = thinkSolve(board, aiHand, humanHand, difficulty);
+			if (difficulty == "easy" || difficulty == "hard") {
+				return searchAct;
+			}
+			return solveAct;
+		};
 
     // --- 4. UI Components (Visuals) ---
 
@@ -291,6 +708,7 @@
 
         // [邏輯修正 1 & 3] 初始化永遠是 Orange 先，不依賴上局狀態
         const initGame = (mode) => {
+						CURRENT_PLAYER = 0;
             const generateHand = (player) => {
                 const hand = [];
                 INITIAL_HAND.forEach(({ size, count }) => {
@@ -325,25 +743,42 @@
             // 只要當前玩家變成 Blue (AI)，且遊戲沒結束，就觸發 AI
             if (gameMode && gameMode.startsWith('ai') && currentPlayer === AI_PLAYER && !winner) {
                 setIsAIThinking(true);
-                const difficulty = gameMode === 'ai-hard' ? 'hard' : 'easy';
+                let difficulty = gameMode === 'ai-hard' ? 'hard' : 'easy';
+								if (gameMode == "ai-crazy") {
+									difficulty = "crazy";
+								}
                 
                 const timer = setTimeout(() => {
-                    try {
-                        const move = think(board, blueHand, orangeHand, difficulty);
-                        setIsAIThinking(false);
-                        if (move) executeMove(move);
-                        else setWinner(HUMAN_PLAYER);
-                    } catch (err) {
-                        setIsAIThinking(false);
-                        const moves = getRawMoves(board, blueHand, AI_PLAYER);
-                        if(moves.length > 0) executeMove(moves[0]);
-                    }
+                    // try {
+                    //     const move = think(board, blueHand, orangeHand, difficulty);
+                    //     setIsAIThinking(false);
+                    //     if (move) executeMove(move);
+                    //     else setWinner(HUMAN_PLAYER);
+                    // } catch (err) {
+                    //     setIsAIThinking(false);
+                    //     const moves = getRawMoves(board, blueHand, AI_PLAYER);
+                    //     if(moves.length > 0) executeMove(moves[0]);
+                    // }
+										think(board, blueHand, orangeHand, difficulty).then(
+											function(move){
+												setIsAIThinking(false);
+												if (move) executeMove(move);
+												else setWinner(HUMAN_PLAYER);
+											},
+											function(err){
+												console.log(err);
+												setIsAIThinking(false);
+												const moves = getRawMoves(board, blueHand, AI_PLAYER);
+												if(moves.length > 0) executeMove(moves[0]);
+											}
+										);
                 }, 100);
                 return () => clearTimeout(timer);
             }
         }, [currentPlayer, gameMode, winner]);
 
         const executeMove = (moveInfo) => {
+						CURRENT_PLAYER = 1 - CURRENT_PLAYER;
             const newBoard = board.map(row => row.map(stack => [...stack]));
             let newOrangeHand = [...orangeHand];
             let newBlueHand = [...blueHand];
@@ -414,6 +849,9 @@
                         </button>
                         <button onClick={() => initGame('ai-hard')} className="p-4 rounded-2xl bg-indigo-100 shadow-[0_8px_0_#c7d2fe] active:shadow-[0_2px_0_#c7d2fe] active:translate-y-1.5 transition-all text-xl font-bold text-indigo-600 border border-indigo-200">
                             AI 困難 <span className="text-xs block opacity-70 font-normal">認真模式</span>
+                        </button>
+                        <button onClick={() => initGame('ai-crazy')} className="p-4 rounded-2xl bg-indigo-100 shadow-[0_8px_0_#c7d2fe] active:shadow-[0_2px_0_#c7d2fe] active:translate-y-1.5 transition-all text-xl font-bold text-indigo-600 border border-indigo-200">
+                            AI 疯狂 <span className="text-xs block opacity-70 font-normal">疯狂模式</span>
                         </button>
                     </div>
                 </div>
@@ -580,6 +1018,13 @@
 
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<GobbletGame />);
+};
+// ort.InferenceSession.create("avg_policy.onnx").then(
+// 	main,
+// 	function(err){
+// 		console.log(err);
+// 	});
+main();
 </script>
 </body>
 </html>
