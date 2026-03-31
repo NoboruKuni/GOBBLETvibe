@@ -436,8 +436,11 @@ async function main() {
 			return nb;
 		}
 		function boardToInt(board) {
+			let nb = new Array(board.length).fill(0);
+			for (let i = 0; i < board.length; i++) {
+				nb[board.length-1-i] = board[i];
+			}
 			let z10 = new Array(10).fill(0);
-			let nb = transformBoard(board, [8, 7, 6, 5, 4, 3, 2, 1, 0]);
 			let intBits = z10.concat(nb)
 			let b = parseInt(intBits.join(""), 2);
 			return b;
@@ -503,8 +506,9 @@ async function main() {
 		}
 		function deCanon(currentPlayer, canBoard0, canA, board0, mask) {
 			let canBoard = applyAction(0, canBoard0, canA);
-			for (let a = 0; a < mask.length; a++) {
-				if (mask[a] == 0) {
+			let canBoardC = canonical(canBoard);
+			for (let a = 0; a < mask.data.length; a++) {
+				if (mask.data[a] == 0) {
 					continue;
 				}
 				let board = applyAction(currentPlayer, board0, a);
@@ -515,7 +519,7 @@ async function main() {
 				}
 				sb = canonical(sb);
 
-				if (JSON.stringify(canBoard) == JSON.stringify(sb)) {
+				if (JSON.stringify(canBoardC) == JSON.stringify(sb)) {
 					return a;
 				}
 			}
@@ -583,6 +587,7 @@ async function main() {
 			return gact;
 		};
 
+		const wrong_map = await (await fetch("wrong_map.json")).json();
 		const session = await ort.InferenceSession.create("policy.onnx");
 		// console.log(session.inputMetadata, session.outputMetadata);
     async function thinkSolve(board, aiHand, humanHand, difficulty) {
@@ -597,13 +602,18 @@ async function main() {
 			sb = canonical(sb);
 			console.log(JSON.stringify(sb));
 
-			const feeds = {
-				x: new ort.Tensor("float32", sb, [sb.length]),
-			};
-			const results = await session.run(feeds);
-			const logits = results.div.cpuData;
-			let aidxCan = argmax(logits);
-			// aidx = randomChoice(logits);
+			let aidxCan = -1;
+			let sbint = boardToInt(sb);
+			if (wrong_map.hasOwnProperty(sbint)) {
+				aidxCan = wrong_map[sbint];
+			} else {
+				const feeds = {
+					x: new ort.Tensor("float32", sb, [sb.length]),
+				};
+				const results = await session.run(feeds);
+				const logits = results.softmax.cpuData;
+				aidxCan = argmax(logits);
+			}
 			let aidx = deCanon(currentPlayer, sb, aidxCan, obs.data.slice(1), mask);
 			const action = actionFromIdx(aidx);
 			console.log("reserves", action.reserves, "src", action.src[0], action.src[1], "dst", action.dst[0], action.dst[1]);
@@ -619,6 +629,9 @@ async function main() {
 			});
 			// const escherAct = thinkEscher(board, aiHand, humanHand, difficulty);
 			const solveAct = thinkSolve(board, aiHand, humanHand, difficulty);
+			if (difficulty == "easy" || difficulty == "hard") {
+				return searchAct;
+			}
 			return solveAct;
 		};
 
@@ -729,7 +742,10 @@ async function main() {
             // 只要當前玩家變成 Blue (AI)，且遊戲沒結束，就觸發 AI
             if (gameMode && gameMode.startsWith('ai') && currentPlayer === AI_PLAYER && !winner) {
                 setIsAIThinking(true);
-                const difficulty = gameMode === 'ai-hard' ? 'hard' : 'easy';
+                let difficulty = gameMode === 'ai-hard' ? 'hard' : 'easy';
+								if (gameMode == "ai-crazy") {
+									difficulty = "crazy";
+								}
                 
                 const timer = setTimeout(() => {
                     // try {
@@ -748,7 +764,8 @@ async function main() {
 												if (move) executeMove(move);
 												else setWinner(HUMAN_PLAYER);
 											},
-											function(){
+											function(err){
+												console.log(err);
 												setIsAIThinking(false);
 												const moves = getRawMoves(board, blueHand, AI_PLAYER);
 												if(moves.length > 0) executeMove(moves[0]);
@@ -831,6 +848,9 @@ async function main() {
                         </button>
                         <button onClick={() => initGame('ai-hard')} className="p-4 rounded-2xl bg-indigo-100 shadow-[0_8px_0_#c7d2fe] active:shadow-[0_2px_0_#c7d2fe] active:translate-y-1.5 transition-all text-xl font-bold text-indigo-600 border border-indigo-200">
                             AI 困難 <span className="text-xs block opacity-70 font-normal">認真模式</span>
+                        </button>
+                        <button onClick={() => initGame('ai-crazy')} className="p-4 rounded-2xl bg-indigo-100 shadow-[0_8px_0_#c7d2fe] active:shadow-[0_2px_0_#c7d2fe] active:translate-y-1.5 transition-all text-xl font-bold text-indigo-600 border border-indigo-200">
+                            AI 疯狂 <span className="text-xs block opacity-70 font-normal">疯狂模式</span>
                         </button>
                     </div>
                 </div>
