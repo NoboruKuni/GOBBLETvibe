@@ -624,15 +624,15 @@ async function main() {
 		}
 
     function think(board, aiHand, humanHand, difficulty){
-			const searchAct = new Promise(function(resolve, reject){
-				let act = thinkSearch(board, aiHand, humanHand, difficulty);
-				resolve(act);
-			});
-			// const escherAct = thinkEscher(board, aiHand, humanHand, difficulty);
-			const solveAct = thinkSolve(board, aiHand, humanHand, difficulty);
 			if (difficulty == "easy" || difficulty == "hard") {
+				const searchAct = new Promise(function(resolve, reject){
+					let act = thinkSearch(board, aiHand, humanHand, difficulty);
+					resolve(act);
+				});
 				return searchAct;
 			}
+			// const escherAct = thinkEscher(board, aiHand, humanHand, difficulty);
+			const solveAct = thinkSolve(board, aiHand, humanHand, difficulty);
 			return solveAct;
 		};
 
