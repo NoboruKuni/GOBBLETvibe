@@ -508,6 +508,8 @@ async function main() {
 		function deCanon(currentPlayer, canBoard0, canA, board0, mask) {
 			let canBoard = applyAction(0, canBoard0, canA);
 			let canBoardC = canonical(canBoard);
+
+			let candidates = [];
 			for (let a = 0; a < mask.data.length; a++) {
 				if (mask.data[a] == 0) {
 					continue;
@@ -521,10 +523,17 @@ async function main() {
 				sb = canonical(sb);
 
 				if (JSON.stringify(canBoardC) == JSON.stringify(sb)) {
-					return a;
+					candidates.push(a);
 				}
 			}
-			alert("no matching action");
+			if (candidates.length == 0) {
+				alert("no matching action");
+				return -1;
+			}
+
+			let probs = new Array(candidates.length).fill(1.0/candidates.length);
+			let cdidx = randomChoice(probs);
+			return candidates[cdidx];
 		}
 
 		function findAction(action, board, aiHand, AI_PLAYER) {
