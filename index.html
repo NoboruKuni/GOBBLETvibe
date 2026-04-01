@@ -252,14 +252,14 @@ async function main() {
 			}
 		};
 
-		const informationStateTensor = (currentPlayer, board) => {
+		const informationStateTensor = (currentPlayer, board, egocentric) => {
 			let tensor = [];
 			for (let i = 0; i < 1+3*3*3*2; i++) {
 				tensor.push(0);
 			}
 
 			let offset = 0;
-			if (currentPlayer == 1) {
+			if (!egocentric && currentPlayer == 1) {
 				tensor[offset+0] = 1;
 			}
 			offset += 1;
@@ -276,6 +276,9 @@ async function main() {
 						}
 						let size = hand.size;
 
+						if (egocentric) {
+							player = 1 - player;
+						}
 						let idx = y*3*3*2 + x*3*2 + size*2 + player;
 						tensor[offset+idx] = 1;
 					}
@@ -580,7 +583,7 @@ async function main() {
 		// console.log(session.inputMetadata, session.outputMetadata);
     async function thinkEscher(board, aiHand, humanHand, difficulty) {
 			const currentPlayer = CURRENT_PLAYER;
-			const obs = informationStateTensor(currentPlayer, board);
+			const obs = informationStateTensor(currentPlayer, board, true);
 			const mask = legalActionsMask(currentPlayer, board);
 			const feeds = {
 				x: new ort.Tensor("float32", obs.data, obs.shape),
@@ -602,7 +605,7 @@ async function main() {
 		// console.log(session.inputMetadata, session.outputMetadata);
     async function thinkSolve(board, aiHand, humanHand, difficulty) {
 			const currentPlayer = CURRENT_PLAYER;
-			const obs = informationStateTensor(currentPlayer, board);
+			const obs = informationStateTensor(currentPlayer, board, false);
 			const mask = legalActionsMask(currentPlayer, board);
 
 			let sb = obs.data.slice(1);
@@ -640,9 +643,8 @@ async function main() {
 				});
 				return searchAct;
 			}
-			// const escherAct = thinkEscher(board, aiHand, humanHand, difficulty);
-			const solveAct = thinkSolve(board, aiHand, humanHand, difficulty);
-			return solveAct;
+			// return thinkEscher(board, aiHand, humanHand, difficulty);
+			return thinkSolve(board, aiHand, humanHand, difficulty);
 		};
 
     // --- 4. UI Components (Visuals) ---
